@@ -1,4 +1,4 @@
-name: 'Terraform'
+name: 'Verify EC2 IaC'
 
 on:
   push:
@@ -15,17 +15,20 @@ jobs:
   provision_environment:
     name: 'Provision EC2 instance'
     runs-on: ubuntu-latest
+    outputs:
+      ec2_url: ${{ steps.save_terraform.outputs.ec2_url }}
 
     steps:
     # Checkout the repository to the GitHub Actions runner
     - name: Checkout
       uses: actions/checkout@v2
 
-    # # Following used for ACT debugging
-    # - name: Install Buster prereqs
-    #   run: |
-    #     apt update
-    #     apt install unzip
+    # Following used for ACT debugging
+    - name: Install Buster prereqs when debugging from CLI (set act environment variable)
+      if: env.act
+      run: |
+        apt update
+        apt install unzip
 
     # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
     - name: Setup Terraform
@@ -41,78 +44,70 @@ jobs:
         # terraform fmt -check
         terraform plan
 
-    # # Abort if the plan failed
-    # - name: Abort on Terrafor failures
-    #   if: steps.plan.outcome == 'failure'
-    #   run: exit 1
+    # Abort if the plan failed
+    - name: Abort on Terrafor failures
+      if: steps.plan.outcome == 'failure'
+      run: exit 1
       
     # Apply the plan to the environment
     - name: Apply Terraform plan
       working-directory: ./aws/ec2
       run: |
         terraform apply -auto-approve
-        # URL=`terraform output -raw url`
-        # echo "--> $URL <--"
-        # echo "Retrieved endpoint: $URL"
-        # terraform output > ${{ github.workspace }}/terraform.output
-        # cat ${{ github.workspace }}/terraform.output
+        terraform output > ${{ github.workspace }}/terraform.output
 
-    - name: Python test
-      shell: python      
-      run: | 
-        import os
-        os.system('cd ./aws/ec2; terraform output > terraform.output')
-        lines = os.popen('terraform.output', 'r').readlines()
-        for line in lines:
-          print('--> ' + line)
-          
+    - name: Determine Terraform output
+      uses:  ./private-actions/shellify-terraform-output
+      with:
+        terraform-output-file: ${{ github.workspace }}/terraform.output
+        shell-output-file: ${{ github.workspace }}/tf_output.sh
 
-    # - name: Persist Terraform output
-    #   uses: actions/upload-artifact@v2
-    #   with:
-    #     name: terraform-output
-    #     path: ${{ github.workspace }}/terraform.output
-
-  # verify_environment:
-  #   name: 'Verify EC2 instance'
-  #   runs-on: ubuntu-latest
-  #   needs: provision_environment
-    
-  #   steps:
-    # - name: Restore Terraform output
-    #   uses: actions/download-artifact@v2
-    #   with:
-    #     name: terraform-output
-
-    - name: Echo endpoint
+    - name: Save Terraform outputs
+      id: save_terraform
       run: |
-        echo Retrieved...
-        cat ${{ github.workspace }}/terraform.output
-    
-    - name: Verify endpoint
+        . ${{ github.workspace }}/tf_output.sh
+        echo "Retrieved output $url"
+        echo "::set-output name=ec2_url::$url"
+      
+  verify_environment:
+    name: 'Verify EC2 instance'
+    runs-on: ubuntu-latest
+    needs: provision_environment
+    environment: 
+      name: cloud-staging
+      url: 'http://${{needs.provision_environment.outputs.ec2_url}}'
+
+    steps:
+    # Allow up to 3-minutes for the instance to spin up and reply
+    - name: Verify endpoint    
       run: |
-        curl ${url}
+        echo 'Retrieved Terraform output: '
+        echo 'Pinging endpoint: ${{needs.provision_environment.outputs.ec2_url}}'
+        curl --retry 11 --retry-delay 15 ${{needs.provision_environment.outputs.ec2_url}}
+
+  destroy_environment:
+    name: 'Destroy EC2 instance'
+    runs-on: ubuntu-latest
+    needs: verify_environment
+    environment: cloud-cleanup
     
-  # destroy_environment:
-  #   name: 'Destrory EC2 instance'
-  #   runs-on: ubuntu-latest
-  #   needs: verify_environment
-    
-  #   steps:
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+
     # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
-    # - name: Setup Terraform
-    #   uses: hashicorp/setup-terraform@v1
-    #   with:
-    #     cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v1
+      with:
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
     # Initialize a new Terraform and destroy the environment
     - name: Destroy environment
+      working-directory: ./aws/ec2
       run: |
-        # terraform init
-        terraform destroy
-
-
-
+        terraform init
+        # terraform plan
+        terraform destroy -auto-approve
 
 
 
